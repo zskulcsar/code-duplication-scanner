@@ -40,8 +40,7 @@ class PythonAnalyzer:
             except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
                 relative_path = str(file_path.relative_to(root_path))
                 logger.warning(
-                    "Skipping file due to parse/read failure",
-                    extra={"file_path": relative_path, "error": str(exc)},
+                    f"Skipping file due to parse/read failure (file_path={relative_path} error={exc})",
                 )
                 errors.append(AnalyzerError(file_path=relative_path, message=str(exc)))
                 continue

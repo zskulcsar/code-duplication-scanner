@@ -43,8 +43,7 @@ def _strip_docstring_blocks(lines: list[str]) -> list[str]:
         tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
     except tokenize.TokenError as exc:
         logger.warning(
-            "Tokenization failed while stripping docstrings; returning comment-stripped lines",
-            extra={"error": str(exc)},
+            f"Tokenization failed while stripping docstrings; returning comment-stripped lines (error={exc})"
         )
         return lines
     for index, token in enumerate(tokens):

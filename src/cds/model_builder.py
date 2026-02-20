@@ -28,8 +28,8 @@ class ModelBuilder:
             normalized_code = normalize_code(symbol.raw_code)
             if not normalized_code:
                 logger.warning(
-                    "Normalized code is empty; MD5 is computed from empty content",
-                    extra={"file_path": symbol.file_path, "kind": symbol.kind},
+                    f"Normalized code is empty; MD5 is computed from empty content "
+                    f"(file_path={symbol.file_path} kind={symbol.kind})",
                 )
             md5sum = hashlib.md5(normalized_code.encode("utf-8")).hexdigest()  # noqa: S324
             records.append(
