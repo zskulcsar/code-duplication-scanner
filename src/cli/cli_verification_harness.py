@@ -1,3 +1,4 @@
+# Copyright 2026 Zsolt Kulcsar and Contributors. Licensed under the EUPL-1.2 or later
 """Phase-1 CLI harness for model-building validation."""
 
 import argparse

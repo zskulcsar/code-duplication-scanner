@@ -1,3 +1,4 @@
+# Copyright 2026 Zsolt Kulcsar and Contributors. Licensed under the EUPL-1.2 or later
 """Domain models for analysis artifacts."""
 
 from dataclasses import dataclass

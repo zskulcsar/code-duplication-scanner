@@ -1,3 +1,4 @@
+# Copyright 2026 Zsolt Kulcsar and Contributors. Licensed under the EUPL-1.2 or later
 """Code normalization helpers for hashing and intent generation input."""
 
 import io

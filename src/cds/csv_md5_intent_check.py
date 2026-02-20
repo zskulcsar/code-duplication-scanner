@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 Zsolt Kulcsar and Contributors. Licensed under the EUPL-1.2 or later
 """Analyze CSV records for duplicated md5 values and similar intents.
 
 # TODO: the below needs adjusting, so that:
