@@ -16,6 +16,7 @@ def _sample_record(
     intent: str | None = "Return a constant integer.",
     intent_status: str = "success",
     intent_error: str | None = None,
+    md5sum: str = "abc123",
 ) -> Record:
     return Record(
         kind=kind,  # type: ignore[arg-type]
@@ -25,7 +26,7 @@ def _sample_record(
         end_line=2,
         raw_code="def f() -> int:\n    return 1",
         normalized_code="def f() -> int:\n    return 1",
-        md5sum="abc123",
+        md5sum=md5sum,
         intent=intent,
         intent_status=intent_status,
         intent_error=intent_error,
@@ -160,3 +161,54 @@ def test_ph3_pers_003_sqlite_persistence_rolls_back_on_insert_failure(
         assert run_count == (0,)
     finally:
         check.close()
+
+
+def test_ph4_pers_001_sqlite_persistence_loads_function_and_method_records_for_run(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "cds.sqlite"
+    persistence = SQLitePersistence(db_path=db_path)
+    records = [
+        _sample_record(kind="function", md5sum="m1"),
+        _sample_record(kind="method", signature="def m(self) -> int:", md5sum="m2"),
+        _sample_record(kind="class", signature="class C:", md5sum="m3"),
+    ]
+
+    persisted = persistence.persist_run(
+        PersistRunInput(
+            root_path=str(tmp_path / "project"),
+            provider_url="http://localhost:11434",
+            model="qwen3-coder:latest",
+            scope="all",
+            progress_batch_size=10,
+            analyzer_error_count=0,
+            records=records,
+        )
+    )
+
+    loaded = persistence.load_records_for_run(run_id=persisted.run_id)
+
+    assert len(loaded) == 2
+    assert {record.kind for record in loaded} == {"function", "method"}
+
+
+def test_ph4_pers_002_sqlite_persistence_load_returns_empty_for_missing_run(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "cds.sqlite"
+    persistence = SQLitePersistence(db_path=db_path)
+    persisted = persistence.persist_run(
+        PersistRunInput(
+            root_path=str(tmp_path / "project"),
+            provider_url="http://localhost:11434",
+            model="qwen3-coder:latest",
+            scope="function",
+            progress_batch_size=10,
+            analyzer_error_count=0,
+            records=[_sample_record(kind="function")],
+        )
+    )
+
+    loaded = persistence.load_records_for_run(run_id=persisted.run_id + 1)
+
+    assert loaded == []

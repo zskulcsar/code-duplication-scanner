@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cds.duplication import PersistedRecord
 from cds.persistence import (
     PersistRunInput,
     PersistRunResult,
@@ -175,3 +176,44 @@ class SQLitePersistence:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_records_intent_status ON records(intent_status)"
         )
+
+    def load_records_for_run(self, run_id: int) -> list[PersistedRecord]:
+        """Load function and method records for one run.
+
+        Args:
+            run_id: Target run identifier.
+
+        Returns:
+            Loaded records for duplication checks.
+
+        Raises:
+            PersistenceError: If query fails.
+        """
+        connection = sqlite3.connect(self._db_path)
+        try:
+            rows = connection.execute(
+                "SELECT id, kind, file_path, signature, start_line, end_line, md5sum, intent "
+                "FROM records WHERE run_id = ? AND kind IN ('function', 'method') "
+                "ORDER BY id ASC",
+                (run_id,),
+            ).fetchall()
+            return [
+                PersistedRecord(
+                    record_id=int(row[0]),
+                    kind=str(row[1]),  # type: ignore[arg-type]
+                    file_path=str(row[2]),
+                    signature=str(row[3]) if row[3] is not None else None,
+                    start_line=int(row[4]),
+                    end_line=int(row[5]),
+                    md5sum=str(row[6]),
+                    intent=str(row[7]) if row[7] is not None else None,
+                )
+                for row in rows
+            ]
+        except sqlite3.DatabaseError as exc:
+            logger.warning(
+                f"SQLite read failed (db_path={self._db_path} run_id={run_id} error={exc})"
+            )
+            raise PersistenceError(str(exc)) from exc
+        finally:
+            connection.close()

@@ -7,8 +7,11 @@ from pathlib import Path
 from cds.llm_client import IntentGenerationError, LLMClient
 from cds.analyzer import ExtractedSymbol
 from cds.analyzers import PythonAnalyzer
+from cds.database import SQLitePersistence
+from cds.model import Record
 from cds.model_builder import ModelBuilder
 from cds.normalizer import normalize_code
+from cds.persistence import PersistRunInput
 from cli.cli_verification_harness import run
 
 
@@ -19,6 +22,22 @@ def _write_file(path: Path, content: str) -> None:
 
 def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def _persist_test_run(db_path: Path, records: list[Record]) -> int:
+    persistence = SQLitePersistence(db_path=db_path)
+    result = persistence.persist_run(
+        PersistRunInput(
+            root_path="/tmp/project",
+            provider_url="http://localhost:11434",
+            model="qwen3-coder:latest",
+            scope="all",
+            progress_batch_size=10,
+            analyzer_error_count=0,
+            records=records,
+        )
+    )
+    return result.run_id
 
 
 class _DeterministicLLMClient(LLMClient):
@@ -603,3 +622,126 @@ def test_ph3_mod_004_cli_persist_marks_completed_with_errors(
         assert status_row == ("completed_with_errors", 1)
     finally:
         connection.close()
+
+
+def test_ph4_mod_001_cli_dup_check_requires_run_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "db" / "cds.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "dup-check",
+            "--db-path",
+            str(db_path),
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+
+
+def test_ph4_mod_002_cli_dup_check_warns_and_returns_zero_for_missing_run(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "db" / "cds.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    run_id = _persist_test_run(
+        db_path,
+        records=[
+            Record(
+                kind="function",
+                file_path="seed.py",
+                signature="def seed() -> int:",
+                start_line=1,
+                end_line=2,
+                raw_code="def seed() -> int:\n    return 1",
+                normalized_code="def seed() -> int:\n    return 1",
+                md5sum="seed-md5",
+                intent="seed intent",
+                intent_status="success",
+                intent_error=None,
+            )
+        ],
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "dup-check",
+            "--db-path",
+            str(db_path),
+            "--run-id",
+            str(run_id + 1),
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert "no duplication findings" in _strip_ansi(stdout.getvalue()).lower()
+
+
+def test_ph4_mod_003_cli_dup_check_renders_exact_and_fuzzy_tables(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "db" / "cds.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    run_id = _persist_test_run(
+        db_path,
+        records=[
+            Record(
+                kind="function",
+                file_path="a.py",
+                signature="def parse_file() -> dict:",
+                start_line=1,
+                end_line=3,
+                raw_code="def parse_file() -> dict:\n    return {}",
+                normalized_code="def parse_file() -> dict:\n    return {}",
+                md5sum="same-md5",
+                intent="parse file content into json object",
+                intent_status="success",
+                intent_error=None,
+            ),
+            Record(
+                kind="method",
+                file_path="b.py",
+                signature="def parse(self) -> dict:",
+                start_line=1,
+                end_line=3,
+                raw_code="def parse(self) -> dict:\n    return {}",
+                normalized_code="def parse(self) -> dict:\n    return {}",
+                md5sum="same-md5",
+                intent="parse file contents into json object",
+                intent_status="success",
+                intent_error=None,
+            ),
+        ],
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "dup-check",
+            "--db-path",
+            str(db_path),
+            "--run-id",
+            str(run_id),
+            "--intent-threshold",
+            "0.8",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    output = _strip_ansi(stdout.getvalue())
+    assert "Exact Duplication Groups" in output
+    assert "Fuzzy Duplication Groups" in output
+    compact_text = re.sub(r"[^a-zA-Z0-9_:.()-]+", "", output).lower()
+    assert "group_id" in compact_text
+    assert "md5_overlap_pairs" in compact_text

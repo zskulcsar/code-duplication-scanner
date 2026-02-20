@@ -4,6 +4,8 @@ Simple Python CLI/TUI project for surfacing likely code duplication from source 
 The current implementation supports:
 - Phase 1: build an analysis model from Python files, normalize code, and compute MD5 fingerprints.
 - Phase 2: enrich records with LLM-generated intent summaries for selected symbol scopes.
+- Phase 3: persist analyzed/enriched run snapshots into SQLite.
+- Phase 4: run duplication checks from persisted runs via CLI tables.
 
 ## Requirements
 
@@ -77,6 +79,22 @@ Notes:
 - `--db-path` is required.
 - Parent directory for `--db-path` must already exist.
 - `persist` always performs intent enrichment before writing run and record snapshots.
+
+## Duplication Check
+
+Run duplication checks for a persisted run:
+
+```bash
+make run-cli ARGS="dup-check --db-path ./tmp/cds.sqlite --run-id 1 --intent-threshold 0.85"
+```
+
+Notes:
+- `--run-id` is required.
+- Output is table-only in phase 4.
+- The command prints two sections:
+  - exact duplication groups (`md5sum`)
+  - fuzzy duplication groups (`Levenshtein.ratio(intent, intent)`)
+- `--intent-threshold` is optional and defaults to `0.85`.
 
 ## Display Note
 

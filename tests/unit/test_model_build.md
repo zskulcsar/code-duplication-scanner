@@ -65,3 +65,15 @@
 * [x] **PH3_MOD_004** CLI persist reports completed_with_errors when enrichment partially fails
 - Description: Validate best-effort persist behavior where one intent generation fails while others succeed.
 - Expected: Exit code is `0`, run summary status is `completed_with_errors`, and persisted run metadata includes non-zero failed intent count.
+
+* [x] **PH4_MOD_001** CLI dup-check requires run-id argument
+- Description: Validate that `dup-check` fails fast when `--run-id` is omitted.
+- Expected: Exit code is `2`.
+
+* [x] **PH4_MOD_002** CLI dup-check returns no-findings for missing run ID
+- Description: Validate that `dup-check` emits a no-findings message and exits successfully when the requested run ID has no records.
+- Expected: Exit code is `0` and stdout indicates no duplication findings.
+
+* [x] **PH4_MOD_003** CLI dup-check renders exact and fuzzy duplication tables
+- Description: Validate that `dup-check` prints both exact and fuzzy duplication sections with group/member score columns.
+- Expected: Exit code is `0` and output includes exact/fuzzy section titles plus group metadata and md5 overlap indicators.

@@ -85,7 +85,11 @@ Testing discipline across all phases:
 3. Persistence wiring
 - Integrate the SQLite persistence layer for analyzed and enriched model data.
 
-4. Textual TUI
+4. Duplication check via existing CLI
+- Perform code duplication checks on persisted/analyzed artifacts.
+- Surface duplication findings through the existing CLI interface.
+
+5. Textual TUI
 - Build the `textual`-based TUI layer for browsing findings.
 
 ## Design Intent to Preserve

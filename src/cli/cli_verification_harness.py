@@ -17,6 +17,7 @@ from rich.table import Table
 from cds.analyzer import AnalyzerError, SymbolKind
 from cds.analyzers import PythonAnalyzer
 from cds.database import SQLitePersistence
+from cds.duplication import DuplicationGroup, DuplicationResult, DuplicationChecker
 from cds.intent_enricher import IntentEnricher
 from cds.llm_client import LLMClient
 from cds.llm import OllamaClient
@@ -38,6 +39,20 @@ TABLE_COLUMN_RATIOS: dict[str, int] = {
     "start_line": 1,
     "end_line": 1,
     "md5sum": 2,
+}
+
+GROUP_TABLE_COLUMN_RATIOS: dict[str, int] = {
+    "group_id": 1,
+    "record_id": 1,
+    "kind": 1,
+    "file_path": 2,
+    "signature": 4,
+    "intent": 4,
+    "start_line": 1,
+    "end_line": 1,
+    "best_ratio": 1,
+    "avg_ratio": 1,
+    "md5_overlap": 1,
 }
 
 ALL_SCOPES: set[SymbolKind] = {"file", "class", "function", "method"}
@@ -65,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         Configured argument parser instance.
     """
     parser = argparse.ArgumentParser(prog="cds")
-    parser.add_argument("--path", required=True, help="Root path to analyze.")
+    parser.add_argument("--path", required=False, help="Root path to analyze.")
     parser.add_argument(
         "--format",
         choices=("table", "json"),
@@ -117,6 +132,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Emit progress line every N completed LLM calls.",
     )
+    dup_check_parser = subparsers.add_parser("dup-check")
+    dup_check_parser.add_argument(
+        "--db-path", required=True, help="SQLite database file path."
+    )
+    dup_check_parser.add_argument("--run-id", required=True, type=int, help="Run id.")
+    dup_check_parser.add_argument(
+        "--intent-threshold",
+        required=False,
+        type=float,
+        default=0.85,
+        help="Intent Levenshtein ratio threshold in [0.0, 1.0].",
+    )
     return parser
 
 
@@ -144,6 +171,8 @@ def run(argv: list[str], stdout: TextIO, stderr: TextIO) -> int:
         return _run_enrich_intent(args=args, stdout=stdout, stderr=stderr)
     if args.command == "persist":
         return _run_persist(args=args, stdout=stdout, stderr=stderr)
+    if args.command == "dup-check":
+        return _run_dup_check(args=args, stdout=stdout, stderr=stderr)
 
     logger.warning(f"Unsupported command (command={args.command})")
     stderr.write(f"Unsupported command: {args.command}\n")
@@ -190,6 +219,10 @@ def _run_model_build(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -
     Returns:
         Exit code.
     """
+    if not args.path:
+        logger.warning("Path argument is required for model-build")
+        stderr.write("Path is required for model-build\n")
+        return 2
     root_path = Path(args.path)
     if not root_path.exists():
         logger.warning(f"Path does not exist (path={root_path})")
@@ -239,6 +272,10 @@ def _run_enrich_intent(
     Returns:
         Exit code.
     """
+    if not args.path:
+        logger.warning("Path argument is required for enrich-intent")
+        stderr.write("Path is required for enrich-intent\n")
+        return 2
     root_path = Path(args.path)
     if not root_path.exists():
         logger.warning(f"Path does not exist (path={root_path})")
@@ -303,6 +340,10 @@ def _run_persist(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     Returns:
         Exit code.
     """
+    if not args.path:
+        logger.warning("Path argument is required for persist")
+        stderr.write("Path is required for persist\n")
+        return 2
     root_path = Path(args.path)
     if not root_path.exists():
         logger.warning(f"Path does not exist (path={root_path})")
@@ -370,6 +411,58 @@ def _run_persist(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     return 0
 
 
+def _run_dup_check(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    """Run dup-check command.
+
+    Args:
+        args: Parsed CLI arguments.
+        stdout: Standard output stream.
+        stderr: Standard error stream.
+
+    Returns:
+        Exit code.
+    """
+    if args.format != "table":
+        logger.warning(f"dup-check does not support format (format={args.format})")
+        stderr.write("dup-check supports only table format\n")
+        return 2
+    if args.intent_threshold < 0.0 or args.intent_threshold > 1.0:
+        logger.warning(
+            f"Invalid intent threshold (intent_threshold={args.intent_threshold})"
+        )
+        stderr.write("intent-threshold must be between 0.0 and 1.0\n")
+        return 2
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        logger.warning(f"DB path does not exist (db_path={db_path})")
+        stderr.write(f"DB path does not exist: {db_path}\n")
+        return 2
+
+    persistence = build_sqlite_persistence(db_path=db_path)
+    try:
+        records = persistence.load_records_for_run(run_id=args.run_id)
+    except PersistenceError as exc:
+        logger.warning(
+            f"Failed to load run records (db_path={db_path} run_id={args.run_id} error={exc})"
+        )
+        stderr.write(f"Failed to load run records: {exc}\n")
+        return 2
+    if not records:
+        logger.warning(
+            f"No records found for run id (db_path={db_path} run_id={args.run_id})"
+        )
+        stdout.write(f"No duplication findings for run_id={args.run_id}\n")
+        return 0
+
+    checker = DuplicationChecker(intent_threshold=args.intent_threshold)
+    result = checker.check(records=records)
+    if not result.exact_groups and not result.fuzzy_groups:
+        stdout.write(f"No duplication findings for run_id={args.run_id}\n")
+        return 0
+    _write_duplication_tables(result=result, stdout=stdout)
+    return 0
+
+
 def parse_scopes(scope_arg: str) -> set[SymbolKind]:
     """Parse CLI scope argument to record kinds.
 
@@ -415,6 +508,18 @@ def build_persistence(db_path: Path) -> Persistence:
 
     Returns:
         Configured persistence backend.
+    """
+    return SQLitePersistence(db_path=db_path)
+
+
+def build_sqlite_persistence(db_path: Path) -> SQLitePersistence:
+    """Create SQLite persistence backend.
+
+    Args:
+        db_path: SQLite database path.
+
+    Returns:
+        SQLite persistence backend.
     """
     return SQLitePersistence(db_path=db_path)
 
@@ -543,6 +648,126 @@ def _write_table(
                 [str(record.start_line), str(record.end_line), str(record.md5sum)]
             )
             table.add_row(*row)
+        console.print(table)
+
+
+def _write_duplication_tables(result: DuplicationResult, stdout: TextIO) -> None:
+    """Write duplication results in table format.
+
+    Args:
+        result: Duplication findings.
+        stdout: Standard output stream.
+    """
+    console = Console(file=stdout, force_terminal=False, color_system="truecolor")
+    _write_group_section(
+        title="Exact Duplication Groups",
+        groups=result.exact_groups,
+        console=console,
+    )
+    _write_group_section(
+        title="Fuzzy Duplication Groups",
+        groups=result.fuzzy_groups,
+        console=console,
+    )
+
+
+def _write_group_section(
+    title: str, groups: list[DuplicationGroup], console: Console
+) -> None:
+    """Write one duplication section with member rows per group.
+
+    Args:
+        title: Section title.
+        groups: Duplication groups to render.
+        console: Output console.
+    """
+    console.rule(title, style=Style(color="cyan"), characters="-")
+    if not groups:
+        console.print("No groups")
+        return
+    for group in groups:
+        console.rule(
+            f"group_id={group.group_id} members={len(group.members)} "
+            f"pairs={group.pair_count} md5_overlap_pairs={group.md5_overlap_pairs}",
+            style=Style(color="green"),
+            characters="-",
+        )
+        table = Table(show_header=True, show_lines=True, expand=True)
+        table.add_column(
+            "group_id",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["group_id"],
+            justify="right",
+            overflow="fold",
+        )
+        table.add_column(
+            "record_id",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["record_id"],
+            justify="right",
+            overflow="fold",
+        )
+        table.add_column(
+            "kind",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["kind"],
+            overflow="fold",
+        )
+        table.add_column(
+            "file_path",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["file_path"],
+            overflow="fold",
+        )
+        table.add_column(
+            "signature",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["signature"],
+            overflow="fold",
+        )
+        table.add_column(
+            "intent",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["intent"],
+            overflow="fold",
+        )
+        table.add_column(
+            "start_line",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["start_line"],
+            justify="right",
+            overflow="fold",
+        )
+        table.add_column(
+            "end_line",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["end_line"],
+            justify="right",
+            overflow="fold",
+        )
+        table.add_column(
+            "best_ratio",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["best_ratio"],
+            justify="right",
+            overflow="fold",
+        )
+        table.add_column(
+            "avg_ratio",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["avg_ratio"],
+            justify="right",
+            overflow="fold",
+        )
+        table.add_column(
+            "md5_overlap",
+            ratio=GROUP_TABLE_COLUMN_RATIOS["md5_overlap"],
+            overflow="fold",
+        )
+        for member in group.members:
+            table.add_row(
+                str(member.group_id),
+                str(member.record_id),
+                str(member.kind),
+                str(member.file_path),
+                str(member.signature),
+                str(member.intent),
+                str(member.start_line),
+                str(member.end_line),
+                f"{member.best_ratio:.4f}",
+                f"{member.avg_ratio:.4f}",
+                "yes" if member.md5_overlap else "no",
+            )
         console.print(table)
 
 

@@ -9,3 +9,11 @@
 * [x] **PH3_PERS_003** SQLite persistence rolls back transaction on record insert failure
 - Description: Validate that when record insertion fails after run insertion starts, the transaction is rolled back and no partial run row remains.
 - Expected: Persistence raises `PersistenceError` and the `runs` table remains empty after the failed operation.
+
+* [x] **PH4_PERS_001** SQLite persistence loads function and method records for a selected run
+- Description: Validate that loading by run ID returns only `function` and `method` records required by duplication checks.
+- Expected: Returned records include exactly function/method kinds and exclude other record kinds.
+
+* [x] **PH4_PERS_002** SQLite persistence returns empty list for missing run ID
+- Description: Validate that loading records for a non-existent run ID returns an empty result instead of failing.
+- Expected: Returned list is empty.
