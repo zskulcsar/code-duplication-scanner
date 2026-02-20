@@ -1,0 +1,27 @@
+[project]
+name = "code-dup-scan"
+version = "0.1.0"
+description = "Experiment with LLM based code duplication checker"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ollama>=0.6.1",
+    "python-levenshtein>=0.27.3",
+    "textual>=8.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pip-audit>=2.10.0",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.15.2",
+    "textual-dev>=1.8.0",
+]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s %(levelname)s %(name)s/%(funcName)s:%(lineno)d: %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"

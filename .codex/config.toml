@@ -1,0 +1,14 @@
+model = "gpt-5.3-codex"
+model_reasoning_effort = "medium"
+[projects."/home/zsoltk/git/shibuya.ltd/pdf-parser"]
+trust_level = "trusted"
+
+[projects."/home/zsoltk/git/experiments/code-duplication-scanner"]
+trust_level = "trusted"
+
+# Context7 MCP server for coding
+[mcp_servers.context7]
+args = ["-y", "@upstash/context7-mcp"]
+command = "npx"
+startup_timeout_sec=30
+
