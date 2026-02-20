@@ -43,6 +43,8 @@ class ModelBuilder:
                     normalized_code=normalized_code,
                     md5sum=md5sum,
                     intent=None,
+                    intent_status="skipped",
+                    intent_error=None,
                 )
             )
         return records

@@ -1,5 +1,5 @@
 # Copyright 2026 Zsolt Kulcsar and Contributors. Licensed under the EUPL-1.2 or later
-"""Phase-1 CLI harness for model-building validation."""
+"""CLI verification harness for model build and intent enrichment."""
 
 import argparse
 import json
@@ -7,14 +7,17 @@ import logging
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.table import Table
 from rich.style import Style
+from rich.table import Table
 
-from cds.analyzer import AnalyzerError
+from cds.analyzer import AnalyzerError, SymbolKind
+from cds.intent_enricher import IntentEnricher
+from cds.llm_client import LLMClient
+from cds.ollama import OllamaClient
 from cds.model import Record
 from cds.model_builder import ModelBuilder
 from cds.python_analyzer import PythonAnalyzer
@@ -30,6 +33,9 @@ TABLE_COLUMN_RATIOS: dict[str, int] = {
     "end_line": 1,
     "md5sum": 2,
 }
+
+ALL_SCOPES: set[SymbolKind] = {"file", "class", "function", "method"}
+DEFAULT_ENRICH_SCOPES: set[SymbolKind] = {"class", "function", "method"}
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -68,6 +74,39 @@ def build_parser() -> argparse.ArgumentParser:
         required=False,
         help="Optional output file path for raw JSON when --format json is used.",
     )
+
+    enrich_intent_parser = subparsers.add_parser("enrich-intent")
+    enrich_intent_parser.add_argument(
+        "--path", required=True, help="Root path to analyze."
+    )
+    enrich_intent_parser.add_argument(
+        "--provider-url", required=True, help="Provider API endpoint URL."
+    )
+    enrich_intent_parser.add_argument(
+        "--model", required=True, help="Provider model name."
+    )
+    enrich_intent_parser.add_argument(
+        "--scope",
+        default="class,function,method",
+        help="Scope list from class,function,method,all.",
+    )
+    enrich_intent_parser.add_argument(
+        "--progress-batch-size",
+        type=int,
+        default=10,
+        help="Emit progress line every N completed LLM calls.",
+    )
+    enrich_intent_parser.add_argument(
+        "--format",
+        choices=("table", "json"),
+        default="table",
+        help="Output format.",
+    )
+    enrich_intent_parser.add_argument(
+        "--output",
+        required=False,
+        help="Optional output file path for raw JSON when --format json is used.",
+    )
     return parser
 
 
@@ -86,24 +125,39 @@ def run(argv: list[str], stdout: TextIO, stderr: TextIO) -> int:
     try:
         args = parser.parse_args(argv)
     except SystemExit:
-        logger.warning("Argument parsing failed", extra={"argv": argv})
+        logger.warning(f"Argument parsing failed (argv={argv})")
         return 2
-    if args.command != "model-build":
-        logger.warning("Unsupported command", extra={"command": args.command})
-        stderr.write(f"Unsupported command: {args.command}\n")
-        return 2
+    if args.command == "model-build":
+        return _run_model_build(args=args, stdout=stdout, stderr=stderr)
+    if args.command == "enrich-intent":
+        return _run_enrich_intent(args=args, stdout=stdout, stderr=stderr)
 
+    logger.warning(f"Unsupported command (command={args.command})")
+    stderr.write(f"Unsupported command: {args.command}\n")
+    return 2
+
+
+def _run_model_build(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    """Run model-build command.
+
+    Args:
+        args: Parsed CLI arguments.
+        stdout: Standard output stream.
+        stderr: Standard error stream.
+
+    Returns:
+        Exit code.
+    """
     root_path = Path(args.path)
     if not root_path.exists():
-        logger.warning("Path does not exist", extra={"path": str(root_path)})
+        logger.warning(f"Path does not exist (path={root_path})")
         stderr.write(f"Path does not exist: {root_path}\n")
         return 2
 
     analyzer = PythonAnalyzer()
     symbols, errors = analyzer.analyze(root_path)
     logger.info(
-        "Model build completed",
-        extra={"path": str(root_path), "records": len(symbols), "errors": len(errors)},
+        f"Model build completed (path={root_path} records={len(symbols)} errors={len(errors)})"
     )
     records = ModelBuilder().build(symbols=symbols)
     _write_errors(errors=errors, stderr=stderr)
@@ -111,22 +165,126 @@ def run(argv: list[str], stdout: TextIO, stderr: TextIO) -> int:
         if args.output:
             try:
                 _write_json_file(
-                    records=records,
-                    errors=errors,
-                    output_path=Path(args.output),
+                    records=records, errors=errors, output_path=Path(args.output)
                 )
             except OSError as exc:
                 logger.warning(
-                    "Failed to write JSON output file",
-                    extra={"output_path": str(args.output), "error": str(exc)},
+                    f"Failed to write JSON output file (output_path={args.output} error={exc})"
                 )
                 stderr.write(f"Failed to write JSON output file: {args.output}\n")
                 return 2
         else:
             _write_json(records=records, errors=errors, stdout=stdout)
     else:
-        _write_table(records=records, root_path=root_path, stdout=stdout)
+        _write_table(
+            records=records, root_path=root_path, stdout=stdout, include_intent=False
+        )
     return 0
+
+
+def _run_enrich_intent(
+    args: argparse.Namespace,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    """Run enrich-intent command.
+
+    Args:
+        args: Parsed CLI arguments.
+        stdout: Standard output stream.
+        stderr: Standard error stream.
+
+    Returns:
+        Exit code.
+    """
+    root_path = Path(args.path)
+    if not root_path.exists():
+        logger.warning(f"Path does not exist (path={root_path})")
+        stderr.write(f"Path does not exist: {root_path}\n")
+        return 2
+    if args.progress_batch_size <= 0:
+        logger.warning(
+            f"Invalid progress batch size (progress_batch_size={args.progress_batch_size})"
+        )
+        stderr.write("progress-batch-size must be > 0\n")
+        return 2
+
+    try:
+        scopes = parse_scopes(args.scope)
+    except ValueError as exc:
+        logger.warning(f"Invalid scope argument (scope={args.scope} error={exc})")
+        stderr.write(f"Invalid scope: {args.scope}\n")
+        return 2
+
+    analyzer = PythonAnalyzer()
+    symbols, errors = analyzer.analyze(root_path)
+    records = ModelBuilder().build(symbols=symbols)
+
+    llm_client = build_llm_client(provider_url=args.provider_url, model=args.model)
+    enriched = IntentEnricher(
+        llm_client=llm_client, progress_batch_size=args.progress_batch_size
+    ).enrich(records=records, scopes=scopes)
+
+    logger.info(
+        f"Intent enrichment completed (path={root_path} records={len(enriched)} errors={len(errors)})"
+    )
+    _write_errors(errors=errors, stderr=stderr)
+    if args.format == "json":
+        if args.output:
+            try:
+                _write_json_file(
+                    records=enriched, errors=errors, output_path=Path(args.output)
+                )
+            except OSError as exc:
+                logger.warning(
+                    f"Failed to write JSON output file (output_path={args.output} error={exc})"
+                )
+                stderr.write(f"Failed to write JSON output file: {args.output}\n")
+                return 2
+        else:
+            _write_json(records=enriched, errors=errors, stdout=stdout)
+    else:
+        _write_table(
+            records=enriched, root_path=root_path, stdout=stdout, include_intent=True
+        )
+    return 0
+
+
+def parse_scopes(scope_arg: str) -> set[SymbolKind]:
+    """Parse CLI scope argument to record kinds.
+
+    Args:
+        scope_arg: Comma-separated scope values.
+
+    Returns:
+        Selected record kinds.
+
+    Raises:
+        ValueError: If scope tokens are invalid.
+    """
+    tokens = [part.strip() for part in scope_arg.split(",") if part.strip()]
+    if not tokens:
+        return set(DEFAULT_ENRICH_SCOPES)
+    valid = {"class", "function", "method", "all"}
+    invalid = sorted({token for token in tokens if token not in valid})
+    if invalid:
+        raise ValueError(f"Unsupported scopes: {', '.join(invalid)}")
+    if "all" in tokens:
+        return set(ALL_SCOPES)
+    return cast(set[SymbolKind], set(tokens))
+
+
+def build_llm_client(provider_url: str, model: str) -> LLMClient:
+    """Create the configured LLM client.
+
+    Args:
+        provider_url: Provider endpoint URL.
+        model: Model name.
+
+    Returns:
+        Configured LLM client.
+    """
+    return OllamaClient(provider_url=provider_url, model=model)
 
 
 def _write_errors(errors: list[AnalyzerError], stderr: TextIO) -> None:
@@ -155,7 +313,12 @@ def _write_json(
         "errors": [asdict(error) for error in errors],
     }
     console = Console(file=stdout, force_terminal=False, color_system="truecolor")
-    console.print(json.dumps(payload, indent=2, sort_keys=True))
+    console.print(
+        json.dumps(payload, indent=2, sort_keys=True),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
 
 
 def _write_json_file(
@@ -176,16 +339,24 @@ def _write_json_file(
         "errors": [asdict(error) for error in errors],
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    output_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
 
 
-def _write_table(records: list[Record], root_path: Path, stdout: TextIO) -> None:
+def _write_table(
+    records: list[Record],
+    root_path: Path,
+    stdout: TextIO,
+    include_intent: bool,
+) -> None:
     """Write records as a tab-separated table.
 
     Args:
         records: Built records.
         root_path: Root path used for analysis.
         stdout: Standard output stream.
+        include_intent: Whether to include the intent column.
     """
     console = Console(file=stdout, force_terminal=False, color_system="truecolor")
     records_by_file: dict[str, list[Record]] = {}
@@ -212,6 +383,8 @@ def _write_table(records: list[Record], root_path: Path, stdout: TextIO) -> None
             ratio=TABLE_COLUMN_RATIOS["normalized_code"],
             overflow="fold",
         )
+        if include_intent:
+            table.add_column("intent", ratio=3, overflow="fold")
         table.add_column(
             "start_line",
             ratio=TABLE_COLUMN_RATIOS["start_line"],
@@ -226,15 +399,18 @@ def _write_table(records: list[Record], root_path: Path, stdout: TextIO) -> None
         )
         table.add_column("md5sum", ratio=TABLE_COLUMN_RATIOS["md5sum"], overflow="fold")
         for record in records_by_file[file_path]:
-            table.add_row(
+            row = [
                 str(record.kind),
                 str(record.file_path),
                 str(record.signature),
                 str(record.normalized_code),
-                str(record.start_line),
-                str(record.end_line),
-                str(record.md5sum),
+            ]
+            if include_intent:
+                row.append(str(record.intent))
+            row.extend(
+                [str(record.start_line), str(record.end_line), str(record.md5sum)]
             )
+            table.add_row(*row)
         console.print(table)
 
 

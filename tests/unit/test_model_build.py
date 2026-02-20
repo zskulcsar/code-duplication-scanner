@@ -3,6 +3,7 @@ import json
 import re
 from pathlib import Path
 
+from cds.llm_client import IntentGenerationError, LLMClient
 from cds.analyzer import ExtractedSymbol
 from cds.model_builder import ModelBuilder
 from cds.normalizer import normalize_code
@@ -17,6 +18,18 @@ def _write_file(path: Path, content: str) -> None:
 
 def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+class _DeterministicLLMClient(LLMClient):
+    def __init__(self, fail_on_calls: set[int] | None = None) -> None:
+        self._fail_on_calls = fail_on_calls or set()
+        self._calls = 0
+
+    def generate_intent(self, code: str) -> str:
+        self._calls += 1
+        if self._calls in self._fail_on_calls:
+            raise IntentGenerationError("intent generation failed")
+        return f"intent::{len(code)}"
 
 
 def test_ph1_mod_001_python_analyzer_extracts_multiline_signature_and_method_kind(
@@ -207,3 +220,218 @@ def test_ph1_mod_008_cli_model_build_json_without_output_prints_json(
     payload = json.loads(_strip_ansi(stdout.getvalue()))
     assert "records" in payload
     assert payload["records"]
+
+
+def test_ph2_mod_001_cli_enrich_intent_requires_provider_and_model(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    _write_file(project_root / "example.py", "def ok() -> int:\n    return 1\n")
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        ["enrich-intent", "--path", str(project_root), "--format", "json"],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+
+
+def test_ph2_mod_002_cli_enrich_intent_default_scope_skips_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_root = tmp_path / "project"
+    _write_file(
+        project_root / "sample.py",
+        "\n".join(
+            [
+                "class C:",
+                "    def m(self) -> int:",
+                "        return 1",
+                "",
+                "def f() -> int:",
+                "    return 2",
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "cli.cli_verification_harness.build_llm_client",
+        lambda provider_url, model: _DeterministicLLMClient(),
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "enrich-intent",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "starcoder2:15b",
+            "--format",
+            "json",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(_strip_ansi(stdout.getvalue()))
+    file_records = [item for item in payload["records"] if item["kind"] == "file"]
+    assert len(file_records) == 1
+    assert file_records[0]["intent_status"] == "skipped"
+    non_file = [item for item in payload["records"] if item["kind"] != "file"]
+    assert all(item["intent_status"] == "success" for item in non_file)
+
+
+def test_ph2_mod_003_cli_enrich_intent_best_effort_failure_marks_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_root = tmp_path / "project"
+    _write_file(
+        project_root / "sample.py",
+        "\n".join(
+            [
+                "def f() -> int:",
+                "    return 2",
+                "",
+                "def g() -> int:",
+                "    return 3",
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "cli.cli_verification_harness.build_llm_client",
+        lambda provider_url, model: _DeterministicLLMClient(fail_on_calls={1}),
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "enrich-intent",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "starcoder2:15b",
+            "--scope",
+            "function",
+            "--format",
+            "json",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(_strip_ansi(stdout.getvalue()))
+    functions = [item for item in payload["records"] if item["kind"] == "function"]
+    assert len(functions) == 2
+    assert any(item["intent_status"] == "failed" for item in functions)
+    assert any(item["intent_status"] == "success" for item in functions)
+
+
+def test_ph2_mod_004_cli_enrich_intent_progress_logging_includes_eta_and_failed(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    project_root = tmp_path / "project"
+    _write_file(
+        project_root / "sample.py",
+        "\n".join(
+            [
+                "def a() -> int:",
+                "    return 1",
+                "",
+                "def b() -> int:",
+                "    return 2",
+                "",
+                "def c() -> int:",
+                "    return 3",
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "cli.cli_verification_harness.build_llm_client",
+        lambda provider_url, model: _DeterministicLLMClient(fail_on_calls={2}),
+    )
+    clock_values = iter([0.0, 2.0, 2.0, 5.0])
+    monkeypatch.setattr(
+        "cds.intent_enricher.time.monotonic",
+        lambda: next(clock_values),
+    )
+    caplog.set_level("INFO")
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "enrich-intent",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "starcoder2:15b",
+            "--scope",
+            "function",
+            "--progress-batch-size",
+            "2",
+            "--format",
+            "json",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    progress_lines = [
+        rec.message
+        for rec in caplog.records
+        if "intent_enrichment_progress" in rec.message
+    ]
+    assert len(progress_lines) >= 2
+    assert any("failed=1" in line for line in progress_lines)
+    assert any("eta_seconds=" in line for line in progress_lines)
+
+
+def test_ph2_mod_005_cli_enrich_intent_scope_all_includes_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_root = tmp_path / "project"
+    _write_file(project_root / "sample.py", "def x() -> int:\n    return 1\n")
+    monkeypatch.setattr(
+        "cli.cli_verification_harness.build_llm_client",
+        lambda provider_url, model: _DeterministicLLMClient(),
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "enrich-intent",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "starcoder2:15b",
+            "--scope",
+            "all",
+            "--format",
+            "json",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(_strip_ansi(stdout.getvalue()))
+    file_records = [item for item in payload["records"] if item["kind"] == "file"]
+    assert len(file_records) == 1
+    assert file_records[0]["intent_status"] == "success"

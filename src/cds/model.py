@@ -19,7 +19,9 @@ class Record:
         raw_code: Exact extracted source block.
         normalized_code: Bare code after comment/docstring stripping.
         md5sum: MD5 hash of ``normalized_code``.
-        intent: Intent description. Set to ``None`` in phase 1.
+        intent: Intent description. Set to ``None`` until enrichment succeeds.
+        intent_status: Enrichment status (`skipped`, `success`, `failed`).
+        intent_error: Error detail for failed enrichments.
     """
 
     kind: SymbolKind
@@ -31,3 +33,5 @@ class Record:
     normalized_code: str
     md5sum: str
     intent: str | None
+    intent_status: str = "skipped"
+    intent_error: str | None = None

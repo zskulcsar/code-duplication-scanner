@@ -29,3 +29,23 @@
 * [x] **PH1_MOD_008** CLI model-build JSON output prints to stdout when no output file is set
 - Description: Validate that JSON is printed to stdout when `--format json` is used without `--output`.
 - Expected: Exit code is zero and stdout contains a JSON object with non-empty `records`.
+
+* [x] **PH2_MOD_001** CLI enrich-intent requires provider and model
+- Description: Validate that `enrich-intent` fails fast when `--provider-url` and `--model` are missing.
+- Expected: Exit code is `2` and command does not proceed with enrichment.
+
+* [x] **PH2_MOD_002** CLI enrich-intent default scope enriches symbols and skips file records
+- Description: Validate default `--scope` behavior (`class,function,method`) so file records remain skipped while other symbols are enriched.
+- Expected: File records have `intent_status=skipped`; class/function/method records have `intent_status=success`.
+
+* [x] **PH2_MOD_003** CLI enrich-intent marks failed records in best-effort mode
+- Description: Validate that enrichment continues when one LLM call fails and failed records keep `intent=None` with failure metadata.
+- Expected: Exit code is zero, at least one function record is `failed`, and another function record is `success`.
+
+* [x] **PH2_MOD_004** CLI enrich-intent emits batch progress logs with failure count and ETA
+- Description: Validate structured progress logging after configured batch intervals with `completed`, `total`, `failed`, and `eta_seconds`.
+- Expected: Progress logs are emitted at least twice, include `failed` count, and include `eta_seconds`.
+
+* [x] **PH2_MOD_005** CLI enrich-intent scope all includes file-level enrichment
+- Description: Validate that `--scope all` enriches file records in addition to class/function/method records.
+- Expected: File record exists and has `intent_status=success`.
