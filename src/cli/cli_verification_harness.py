@@ -15,12 +15,18 @@ from rich.style import Style
 from rich.table import Table
 
 from cds.analyzer import AnalyzerError, SymbolKind
+from cds.analyzers import PythonAnalyzer
+from cds.database import SQLitePersistence
 from cds.intent_enricher import IntentEnricher
 from cds.llm_client import LLMClient
-from cds.ollama import OllamaClient
+from cds.llm import OllamaClient
 from cds.model import Record
 from cds.model_builder import ModelBuilder
-from cds.python_analyzer import PythonAnalyzer
+from cds.persistence import (
+    PersistRunInput,
+    Persistence,
+    PersistenceError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +42,7 @@ TABLE_COLUMN_RATIOS: dict[str, int] = {
 
 ALL_SCOPES: set[SymbolKind] = {"file", "class", "function", "method"}
 DEFAULT_ENRICH_SCOPES: set[SymbolKind] = {"class", "function", "method"}
+ROOT_OPTION_FLAGS: tuple[str, ...] = ("--path", "--format", "--output")
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -58,27 +65,22 @@ def build_parser() -> argparse.ArgumentParser:
         Configured argument parser instance.
     """
     parser = argparse.ArgumentParser(prog="cds")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    model_build_parser = subparsers.add_parser("model-build")
-    model_build_parser.add_argument(
-        "--path", required=True, help="Root path to analyze."
-    )
-    model_build_parser.add_argument(
+    parser.add_argument("--path", required=True, help="Root path to analyze.")
+    parser.add_argument(
         "--format",
         choices=("table", "json"),
         default="table",
         help="Output format.",
     )
-    model_build_parser.add_argument(
+    parser.add_argument(
         "--output",
         required=False,
         help="Optional output file path for raw JSON when --format json is used.",
     )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("model-build")
 
     enrich_intent_parser = subparsers.add_parser("enrich-intent")
-    enrich_intent_parser.add_argument(
-        "--path", required=True, help="Root path to analyze."
-    )
     enrich_intent_parser.add_argument(
         "--provider-url", required=True, help="Provider API endpoint URL."
     )
@@ -96,16 +98,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Emit progress line every N completed LLM calls.",
     )
-    enrich_intent_parser.add_argument(
-        "--format",
-        choices=("table", "json"),
-        default="table",
-        help="Output format.",
+    persist_parser = subparsers.add_parser("persist")
+    persist_parser.add_argument(
+        "--provider-url", required=True, help="Provider API endpoint URL."
     )
-    enrich_intent_parser.add_argument(
-        "--output",
-        required=False,
-        help="Optional output file path for raw JSON when --format json is used.",
+    persist_parser.add_argument("--model", required=True, help="Provider model name.")
+    persist_parser.add_argument(
+        "--db-path", required=True, help="SQLite database file path."
+    )
+    persist_parser.add_argument(
+        "--scope",
+        default="class,function,method",
+        help="Scope list from class,function,method,all.",
+    )
+    persist_parser.add_argument(
+        "--progress-batch-size",
+        type=int,
+        default=10,
+        help="Emit progress line every N completed LLM calls.",
     )
     return parser
 
@@ -122,8 +132,9 @@ def run(argv: list[str], stdout: TextIO, stderr: TextIO) -> int:
         Exit code.
     """
     parser = build_parser()
+    normalized_argv = _normalize_root_options(argv=argv)
     try:
-        args = parser.parse_args(argv)
+        args = parser.parse_args(normalized_argv)
     except SystemExit:
         logger.warning(f"Argument parsing failed (argv={argv})")
         return 2
@@ -131,10 +142,41 @@ def run(argv: list[str], stdout: TextIO, stderr: TextIO) -> int:
         return _run_model_build(args=args, stdout=stdout, stderr=stderr)
     if args.command == "enrich-intent":
         return _run_enrich_intent(args=args, stdout=stdout, stderr=stderr)
+    if args.command == "persist":
+        return _run_persist(args=args, stdout=stdout, stderr=stderr)
 
     logger.warning(f"Unsupported command (command={args.command})")
     stderr.write(f"Unsupported command: {args.command}\n")
     return 2
+
+
+def _normalize_root_options(argv: list[str]) -> list[str]:
+    """Move root options before subcommand for argparse compatibility.
+
+    Args:
+        argv: Raw CLI argument vector.
+
+    Returns:
+        Normalized argument vector with root options before the subcommand.
+    """
+    root_tokens: list[str] = []
+    remaining_tokens: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in ROOT_OPTION_FLAGS:
+            root_tokens.append(token)
+            if index + 1 < len(argv):
+                root_tokens.append(argv[index + 1])
+                index += 2
+                continue
+        if any(token.startswith(f"{flag}=") for flag in ROOT_OPTION_FLAGS):
+            root_tokens.append(token)
+            index += 1
+            continue
+        remaining_tokens.append(token)
+        index += 1
+    return root_tokens + remaining_tokens
 
 
 def _run_model_build(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
@@ -250,6 +292,84 @@ def _run_enrich_intent(
     return 0
 
 
+def _run_persist(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    """Run persist command.
+
+    Args:
+        args: Parsed CLI arguments.
+        stdout: Standard output stream.
+        stderr: Standard error stream.
+
+    Returns:
+        Exit code.
+    """
+    root_path = Path(args.path)
+    if not root_path.exists():
+        logger.warning(f"Path does not exist (path={root_path})")
+        stderr.write(f"Path does not exist: {root_path}\n")
+        return 2
+    if args.progress_batch_size <= 0:
+        logger.warning(
+            f"Invalid progress batch size (progress_batch_size={args.progress_batch_size})"
+        )
+        stderr.write("progress-batch-size must be > 0\n")
+        return 2
+    db_path = Path(args.db_path)
+    if not db_path.parent.exists():
+        logger.warning(f"Parent directory does not exist (db_path={db_path})")
+        stderr.write(f"Parent directory does not exist: {db_path.parent}\n")
+        return 2
+    try:
+        scopes = parse_scopes(args.scope)
+    except ValueError as exc:
+        logger.warning(f"Invalid scope argument (scope={args.scope} error={exc})")
+        stderr.write(f"Invalid scope: {args.scope}\n")
+        return 2
+
+    analyzer = PythonAnalyzer()
+    symbols, errors = analyzer.analyze(root_path)
+    records = ModelBuilder().build(symbols=symbols)
+
+    llm_client = build_llm_client(provider_url=args.provider_url, model=args.model)
+    enriched = IntentEnricher(
+        llm_client=llm_client, progress_batch_size=args.progress_batch_size
+    ).enrich(records=records, scopes=scopes)
+    _write_errors(errors=errors, stderr=stderr)
+
+    persistence = build_persistence(db_path=db_path)
+    try:
+        result = persistence.persist_run(
+            PersistRunInput(
+                root_path=str(root_path),
+                provider_url=args.provider_url,
+                model=args.model,
+                scope=args.scope,
+                progress_batch_size=args.progress_batch_size,
+                analyzer_error_count=len(errors),
+                records=enriched,
+            )
+        )
+    except PersistenceError as exc:
+        logger.warning(f"Persist command failed (db_path={db_path} error={exc})")
+        stderr.write(f"Persistence failed: {exc}\n")
+        return 2
+
+    logger.info(
+        f"Persist command completed (path={root_path} db_path={db_path} "
+        f"records={result.record_count} status={result.status})"
+    )
+    stdout.write(
+        "persisted "
+        f"run_id={result.run_id} "
+        f"db_path={db_path} "
+        f"record_count={result.record_count} "
+        f"intent_failed_count={result.intent_failed_count} "
+        f"analyzer_error_count={result.analyzer_error_count} "
+        f"status={result.status}\n"
+    )
+    return 0
+
+
 def parse_scopes(scope_arg: str) -> set[SymbolKind]:
     """Parse CLI scope argument to record kinds.
 
@@ -285,6 +405,18 @@ def build_llm_client(provider_url: str, model: str) -> LLMClient:
         Configured LLM client.
     """
     return OllamaClient(provider_url=provider_url, model=model)
+
+
+def build_persistence(db_path: Path) -> Persistence:
+    """Create the configured persistence backend.
+
+    Args:
+        db_path: SQLite database path.
+
+    Returns:
+        Configured persistence backend.
+    """
+    return SQLitePersistence(db_path=db_path)
 
 
 def _write_errors(errors: list[AnalyzerError], stderr: TextIO) -> None:

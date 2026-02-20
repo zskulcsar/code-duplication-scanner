@@ -65,6 +65,19 @@ Model notes from current testing:
 - `qwen3-coder:latest` worked very well.
 - `starcoder2:15b` produced weaker results and failed frequently.
 
+## Persistence
+
+Persist one full run snapshot (analyze -> enrich -> SQLite):
+
+```bash
+make run-cli ARGS="persist --path ./src --provider-url http://llm.shibuya.local:11434 --model qwen3-coder:latest --db-path ./tmp/cds.sqlite --scope class,function,method --progress-batch-size 10"
+```
+
+Notes:
+- `--db-path` is required.
+- Parent directory for `--db-path` must already exist.
+- `persist` always performs intent enrichment before writing run and record snapshots.
+
 ## Display Note
 
 The table view is best experienced on wide screens/terminals because signatures and normalized code can be long.

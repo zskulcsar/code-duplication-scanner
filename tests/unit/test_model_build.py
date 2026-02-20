@@ -1,13 +1,14 @@
 import io
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 from cds.llm_client import IntentGenerationError, LLMClient
 from cds.analyzer import ExtractedSymbol
+from cds.analyzers import PythonAnalyzer
 from cds.model_builder import ModelBuilder
 from cds.normalizer import normalize_code
-from cds.python_analyzer import PythonAnalyzer
 from cli.cli_verification_harness import run
 
 
@@ -435,3 +436,170 @@ def test_ph2_mod_005_cli_enrich_intent_scope_all_includes_file(
     file_records = [item for item in payload["records"] if item["kind"] == "file"]
     assert len(file_records) == 1
     assert file_records[0]["intent_status"] == "success"
+
+
+def test_ph3_mod_001_cli_persist_requires_db_path(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    _write_file(project_root / "example.py", "def ok() -> int:\n    return 1\n")
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "persist",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "qwen3-coder:latest",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+
+
+def test_ph3_mod_002_cli_persist_fails_when_db_parent_missing(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    _write_file(project_root / "example.py", "def ok() -> int:\n    return 1\n")
+    db_path = tmp_path / "missing-dir" / "cds.sqlite"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "persist",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "qwen3-coder:latest",
+            "--db-path",
+            str(db_path),
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert "Parent directory does not exist" in stderr.getvalue()
+
+
+def test_ph3_mod_003_cli_persist_saves_snapshot_and_prints_summary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_root = tmp_path / "project"
+    db_path = tmp_path / "db" / "cds.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_file(
+        project_root / "sample.py",
+        "\n".join(
+            [
+                "class C:",
+                "    def m(self) -> int:",
+                "        return 1",
+                "",
+                "def f() -> int:",
+                "    return 2",
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "cli.cli_verification_harness.build_llm_client",
+        lambda provider_url, model: _DeterministicLLMClient(),
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "persist",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "qwen3-coder:latest",
+            "--db-path",
+            str(db_path),
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    summary = stdout.getvalue()
+    assert "run_id=" in summary
+    assert "record_count=" in summary
+    assert "status=completed" in summary
+    assert stderr.getvalue() == ""
+
+    connection = sqlite3.connect(db_path)
+    try:
+        run_count = connection.execute("SELECT COUNT(*) FROM runs").fetchone()
+        record_count = connection.execute("SELECT COUNT(*) FROM records").fetchone()
+        assert run_count == (1,)
+        assert record_count == (4,)
+    finally:
+        connection.close()
+
+
+def test_ph3_mod_004_cli_persist_marks_completed_with_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_root = tmp_path / "project"
+    db_path = tmp_path / "db" / "cds.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_file(
+        project_root / "sample.py",
+        "\n".join(
+            [
+                "def f() -> int:",
+                "    return 2",
+                "",
+                "def g() -> int:",
+                "    return 3",
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "cli.cli_verification_harness.build_llm_client",
+        lambda provider_url, model: _DeterministicLLMClient(fail_on_calls={1}),
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "persist",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "starcoder2:15b",
+            "--db-path",
+            str(db_path),
+            "--scope",
+            "function",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert "status=completed_with_errors" in stdout.getvalue()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        status_row = connection.execute(
+            "SELECT status, intent_failed_count FROM runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert status_row == ("completed_with_errors", 1)
+    finally:
+        connection.close()

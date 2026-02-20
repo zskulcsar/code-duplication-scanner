@@ -49,3 +49,19 @@
 * [x] **PH2_MOD_005** CLI enrich-intent scope all includes file-level enrichment
 - Description: Validate that `--scope all` enriches file records in addition to class/function/method records.
 - Expected: File record exists and has `intent_status=success`.
+
+* [x] **PH3_MOD_001** CLI persist requires db path argument
+- Description: Validate that `persist` fails fast when `--db-path` is missing.
+- Expected: Exit code is `2` and execution does not proceed to analysis/enrichment.
+
+* [x] **PH3_MOD_002** CLI persist fails when db parent directory does not exist
+- Description: Validate that `persist` rejects a database path when the parent directory is absent.
+- Expected: Exit code is `2` and stderr contains a parent-directory validation error.
+
+* [x] **PH3_MOD_003** CLI persist saves snapshot and prints run summary
+- Description: Validate successful end-to-end persist flow with deterministic enrichment and SQLite writes.
+- Expected: Exit code is `0`, stdout summary includes run metadata fields, and database contains one run with matching record inserts.
+
+* [x] **PH3_MOD_004** CLI persist reports completed_with_errors when enrichment partially fails
+- Description: Validate best-effort persist behavior where one intent generation fails while others succeed.
+- Expected: Exit code is `0`, run summary status is `completed_with_errors`, and persisted run metadata includes non-zero failed intent count.
