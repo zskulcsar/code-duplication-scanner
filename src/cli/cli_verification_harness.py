@@ -1,0 +1,248 @@
+"""Phase-1 CLI harness for model-building validation."""
+
+import argparse
+import json
+import logging
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from typing import TextIO
+
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.table import Table
+from rich.style import Style
+
+from cds.analyzer import AnalyzerError
+from cds.model import Record
+from cds.model_builder import ModelBuilder
+from cds.python_analyzer import PythonAnalyzer
+
+logger = logging.getLogger(__name__)
+
+TABLE_COLUMN_RATIOS: dict[str, int] = {
+    "kind": 1,
+    "file_path": 1,
+    "signature": 4,
+    "normalized_code": 5,
+    "start_line": 1,
+    "end_line": 1,
+    "md5sum": 2,
+}
+
+
+def configure_logging(level: int = logging.INFO) -> None:
+    """Configure application logging with Rich handler.
+
+    Args:
+        level: Logging severity threshold.
+    """
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level CLI parser.
+
+    Returns:
+        Configured argument parser instance.
+    """
+    parser = argparse.ArgumentParser(prog="cds")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    model_build_parser = subparsers.add_parser("model-build")
+    model_build_parser.add_argument(
+        "--path", required=True, help="Root path to analyze."
+    )
+    model_build_parser.add_argument(
+        "--format",
+        choices=("table", "json"),
+        default="table",
+        help="Output format.",
+    )
+    model_build_parser.add_argument(
+        "--output",
+        required=False,
+        help="Optional output file path for raw JSON when --format json is used.",
+    )
+    return parser
+
+
+def run(argv: list[str], stdout: TextIO, stderr: TextIO) -> int:
+    """Run CLI command.
+
+    Args:
+        argv: CLI arguments.
+        stdout: Standard output stream.
+        stderr: Standard error stream.
+
+    Returns:
+        Exit code.
+    """
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        logger.warning("Argument parsing failed", extra={"argv": argv})
+        return 2
+    if args.command != "model-build":
+        logger.warning("Unsupported command", extra={"command": args.command})
+        stderr.write(f"Unsupported command: {args.command}\n")
+        return 2
+
+    root_path = Path(args.path)
+    if not root_path.exists():
+        logger.warning("Path does not exist", extra={"path": str(root_path)})
+        stderr.write(f"Path does not exist: {root_path}\n")
+        return 2
+
+    analyzer = PythonAnalyzer()
+    symbols, errors = analyzer.analyze(root_path)
+    logger.info(
+        "Model build completed",
+        extra={"path": str(root_path), "records": len(symbols), "errors": len(errors)},
+    )
+    records = ModelBuilder().build(symbols=symbols)
+    _write_errors(errors=errors, stderr=stderr)
+    if args.format == "json":
+        if args.output:
+            try:
+                _write_json_file(
+                    records=records,
+                    errors=errors,
+                    output_path=Path(args.output),
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Failed to write JSON output file",
+                    extra={"output_path": str(args.output), "error": str(exc)},
+                )
+                stderr.write(f"Failed to write JSON output file: {args.output}\n")
+                return 2
+        else:
+            _write_json(records=records, errors=errors, stdout=stdout)
+    else:
+        _write_table(records=records, root_path=root_path, stdout=stdout)
+    return 0
+
+
+def _write_errors(errors: list[AnalyzerError], stderr: TextIO) -> None:
+    """Write analyzer errors to stderr.
+
+    Args:
+        errors: Recoverable analyzer errors.
+        stderr: Standard error stream.
+    """
+    for error in errors:
+        stderr.write(f"analyzer_error: {error}\n")
+
+
+def _write_json(
+    records: list[Record], errors: list[AnalyzerError], stdout: TextIO
+) -> None:
+    """Write records and errors in JSON format.
+
+    Args:
+        records: Built records.
+        errors: Recoverable analyzer errors.
+        stdout: Standard output stream.
+    """
+    payload = {
+        "records": [asdict(record) for record in records],
+        "errors": [asdict(error) for error in errors],
+    }
+    console = Console(file=stdout, force_terminal=False, color_system="truecolor")
+    console.print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _write_json_file(
+    records: list[Record], errors: list[AnalyzerError], output_path: Path
+) -> None:
+    """Write raw JSON payload to an output file.
+
+    Args:
+        records: Built records.
+        errors: Recoverable analyzer errors.
+        output_path: Target file path.
+
+    Raises:
+        OSError: If directory creation or file writing fails.
+    """
+    payload = {
+        "records": [asdict(record) for record in records],
+        "errors": [asdict(error) for error in errors],
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_table(records: list[Record], root_path: Path, stdout: TextIO) -> None:
+    """Write records as a tab-separated table.
+
+    Args:
+        records: Built records.
+        root_path: Root path used for analysis.
+        stdout: Standard output stream.
+    """
+    console = Console(file=stdout, force_terminal=False, color_system="truecolor")
+    records_by_file: dict[str, list[Record]] = {}
+    for record in records:
+        records_by_file.setdefault(record.file_path, []).append(record)
+
+    for file_path in sorted(records_by_file):
+        full_path = str((root_path / file_path).resolve())
+        console.rule(f"{full_path}", style=Style(color="cyan"), characters="-")
+        table = Table(show_header=True, show_lines=True, expand=True)
+        table.add_column("kind", ratio=TABLE_COLUMN_RATIOS["kind"], overflow="fold")
+        table.add_column(
+            "file_path",
+            ratio=TABLE_COLUMN_RATIOS["file_path"],
+            overflow="fold",
+        )
+        table.add_column(
+            "signature",
+            ratio=TABLE_COLUMN_RATIOS["signature"],
+            overflow="fold",
+        )
+        table.add_column(
+            "normalized_code",
+            ratio=TABLE_COLUMN_RATIOS["normalized_code"],
+            overflow="fold",
+        )
+        table.add_column(
+            "start_line",
+            ratio=TABLE_COLUMN_RATIOS["start_line"],
+            justify="right",
+            overflow="fold",
+        )
+        table.add_column(
+            "end_line",
+            ratio=TABLE_COLUMN_RATIOS["end_line"],
+            justify="right",
+            overflow="fold",
+        )
+        table.add_column("md5sum", ratio=TABLE_COLUMN_RATIOS["md5sum"], overflow="fold")
+        for record in records_by_file[file_path]:
+            table.add_row(
+                str(record.kind),
+                str(record.file_path),
+                str(record.signature),
+                str(record.normalized_code),
+                str(record.start_line),
+                str(record.end_line),
+                str(record.md5sum),
+            )
+        console.print(table)
+
+
+def main() -> None:
+    """Run the CLI application and exit."""
+    configure_logging()
+    exit_code = run(sys.argv[1:], stdout=sys.stdout, stderr=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
