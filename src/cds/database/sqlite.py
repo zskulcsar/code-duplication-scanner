@@ -192,7 +192,7 @@ class SQLitePersistence:
         connection = sqlite3.connect(self._db_path)
         try:
             rows = connection.execute(
-                "SELECT id, kind, file_path, signature, start_line, end_line, md5sum, intent "
+                "SELECT id, kind, file_path, signature, start_line, end_line, md5sum, normalized_code, intent "
                 "FROM records WHERE run_id = ? AND kind IN ('function', 'method') "
                 "ORDER BY id ASC",
                 (run_id,),
@@ -206,7 +206,8 @@ class SQLitePersistence:
                     start_line=int(row[4]),
                     end_line=int(row[5]),
                     md5sum=str(row[6]),
-                    intent=str(row[7]) if row[7] is not None else None,
+                    normalized_code=str(row[7]),
+                    intent=str(row[8]) if row[8] is not None else None,
                 )
                 for row in rows
             ]

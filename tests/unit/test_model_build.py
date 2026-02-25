@@ -1,13 +1,21 @@
+# Copyright 2026 Zsolt Kulcsar and Contributors. Licensed under the EUPL-1.2 or later
+"""Unit tests for CLI model build, enrichment, persistence, and duplication flows."""
+
 import io
 import json
 import re
 import sqlite3
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from cds.llm_client import IntentGenerationError, LLMClient
 from cds.analyzer import ExtractedSymbol
 from cds.analyzers import PythonAnalyzer
 from cds.database import SQLitePersistence
+from cds.llm import OpenAIClient
 from cds.model import Record
 from cds.model_builder import ModelBuilder
 from cds.normalizer import normalize_code
@@ -50,6 +58,25 @@ class _DeterministicLLMClient(LLMClient):
         if self._calls in self._fail_on_calls:
             raise IntentGenerationError("intent generation failed")
         return f"intent::{len(code)}"
+
+
+class _ThreadTrackingLLMClient(LLMClient):
+    def __init__(self, delay_seconds: float = 0.01) -> None:
+        self._delay_seconds = delay_seconds
+        self._thread_ids: set[int] = set()
+        self._lock = threading.Lock()
+
+    @property
+    def thread_count(self) -> int:
+        return len(self._thread_ids)
+
+    def generate_intent(self, code: str) -> str:
+        del code
+        time.sleep(self._delay_seconds)
+        thread_id = threading.get_ident()
+        with self._lock:
+            self._thread_ids.add(thread_id)
+        return "intent::threaded"
 
 
 def test_ph1_mod_001_python_analyzer_extracts_multiline_signature_and_method_kind(
@@ -240,6 +267,47 @@ def test_ph1_mod_008_cli_model_build_json_without_output_prints_json(
     payload = json.loads(_strip_ansi(stdout.getvalue()))
     assert "records" in payload
     assert payload["records"]
+
+
+def test_ph1_mod_009_cli_model_build_analyzer_workers_use_multiple_threads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_root = tmp_path / "project"
+    for index in range(8):
+        _write_file(
+            project_root / f"example_{index}.py",
+            f"def f_{index}() -> int:\n    return {index}\n",
+        )
+    thread_ids: set[int] = set()
+    lock = threading.Lock()
+    original_parse = __import__("ast").parse
+
+    def _tracking_parse(source: str, filename: str, mode: str = "exec"):
+        time.sleep(0.01)
+        with lock:
+            thread_ids.add(threading.get_ident())
+        return original_parse(source, filename=filename, mode=mode)
+
+    monkeypatch.setattr("cds.analyzers.python.ast.parse", _tracking_parse)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "model-build",
+            "--path",
+            str(project_root),
+            "--format",
+            "json",
+            "--analyzer-workers",
+            "4",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert len(thread_ids) > 1
 
 
 def test_ph2_mod_001_cli_enrich_intent_requires_provider_and_model(
@@ -455,6 +523,134 @@ def test_ph2_mod_005_cli_enrich_intent_scope_all_includes_file(
     file_records = [item for item in payload["records"] if item["kind"] == "file"]
     assert len(file_records) == 1
     assert file_records[0]["intent_status"] == "success"
+
+
+def test_ph2_mod_006_cli_enrich_intent_enricher_workers_use_multiple_threads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_root = tmp_path / "project"
+    _write_file(
+        project_root / "sample.py",
+        "\n".join(
+            [
+                "def a() -> int:",
+                "    return 1",
+                "",
+                "def b() -> int:",
+                "    return 2",
+                "",
+                "def c() -> int:",
+                "    return 3",
+                "",
+                "def d() -> int:",
+                "    return 4",
+            ]
+        ),
+    )
+    llm_client = _ThreadTrackingLLMClient()
+    monkeypatch.setattr(
+        "cli.cli_verification_harness.build_llm_client",
+        lambda provider_url, model: llm_client,
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = run(
+        [
+            "enrich-intent",
+            "--path",
+            str(project_root),
+            "--provider-url",
+            "http://localhost:11434",
+            "--model",
+            "starcoder2:15b",
+            "--scope",
+            "function",
+            "--format",
+            "json",
+            "--enricher-workers",
+            "4",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert llm_client.thread_count > 1
+
+
+def test_ph2_mod_007_build_llm_client_uses_openai_client_for_openai_provider() -> None:
+    from cli.cli_verification_harness import build_llm_client
+
+    client = build_llm_client(
+        provider_url="https://api.openai.com/v1",
+        model="ignored-by-openai-client-selection",
+    )
+
+    assert isinstance(client, OpenAIClient)
+
+
+def test_ph2_mod_008_openai_client_uses_gpt_5_2_codex_and_response_output_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    class _FakeResponses:
+        def create(self, **kwargs: str) -> object:
+            captured.update(kwargs)
+            return type("Response", (), {"output_text": "intent text"})()
+
+    class _FakeClient:
+        def __init__(self, base_url: str) -> None:
+            self.base_url = base_url
+            self.responses = _FakeResponses()
+
+    monkeypatch.setattr("cds.llm.openai_client.OpenAI", _FakeClient)
+    client = OpenAIClient(provider_url="https://api.openai.com/v1")
+
+    content = client.generate_intent("def x() -> int:\n    return 1")
+
+    assert content == "intent text"
+    assert captured["model"] == "gpt-5.2-codex"
+    assert "Summarize the intent" in captured["instructions"]
+
+
+def test_ph2_mod_009_openai_client_normalizes_openai_short_provider_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    class _FakeResponses:
+        def create(self, **kwargs: str) -> object:
+            captured.update(kwargs)
+            return type("Response", (), {"output_text": "intent text"})()
+
+    class _FakeClient:
+        def __init__(self, base_url: str) -> None:
+            captured["base_url"] = base_url
+            self.responses = _FakeResponses()
+
+    monkeypatch.setattr("cds.llm.openai_client.OpenAI", _FakeClient)
+    client = OpenAIClient(provider_url="openai.com")
+
+    content = client.generate_intent("def x() -> int:\n    return 1")
+
+    assert content == "intent text"
+    assert captured["base_url"] == "https://api.openai.com/v1"
+
+
+def test_ph2_mod_010_openai_client_raises_for_invalid_provider_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeClient:
+        def __init__(self, base_url: str) -> None:
+            self.responses = None
+
+    monkeypatch.setattr("cds.llm.openai_client.OpenAI", _FakeClient)
+    client = OpenAIClient(provider_url="http:///bad")
+
+    with pytest.raises(IntentGenerationError, match="Invalid OpenAI provider URL"):
+        client.generate_intent("def x() -> int:\n    return 1")
 
 
 def test_ph3_mod_001_cli_persist_requires_db_path(tmp_path: Path) -> None:
@@ -742,6 +938,21 @@ def test_ph4_mod_003_cli_dup_check_renders_exact_and_fuzzy_tables(
     output = _strip_ansi(stdout.getvalue())
     assert "Exact Duplication Groups" in output
     assert "Fuzzy Duplication Groups" in output
+    assert "Normalized Code Fuzzy Duplication Groups" in output
+    assert output.index("Exact Duplication Groups") < output.index(
+        "Fuzzy Duplication Groups"
+    )
+    assert output.index("Fuzzy Duplication Groups") < output.index(
+        "Normalized Code Fuzzy Duplication Groups"
+    )
+    normalized_code_section = output.split(
+        "Normalized Code Fuzzy Duplication Groups", maxsplit=1
+    )[1]
+    normalized_compact = re.sub(
+        r"[^a-zA-Z0-9_:.()-]+", "", normalized_code_section
+    ).lower()
+    assert "normalized_code" in normalized_compact
+    assert "intent" not in normalized_compact
     compact_text = re.sub(r"[^a-zA-Z0-9_:.()-]+", "", output).lower()
     assert "group_id" in compact_text
     assert "md5_overlap_pairs" in compact_text

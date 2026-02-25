@@ -15,6 +15,7 @@ def test_ph4_dup_001_checker_groups_exact_md5_for_function_and_method_only() -> 
             start_line=1,
             end_line=2,
             md5sum="same",
+            normalized_code="def a() -> int:\n    return 1",
             intent="return one",
         ),
         PersistedRecord(
@@ -25,6 +26,7 @@ def test_ph4_dup_001_checker_groups_exact_md5_for_function_and_method_only() -> 
             start_line=1,
             end_line=2,
             md5sum="same",
+            normalized_code="def b(self) -> int:\n    return 1",
             intent="return one",
         ),
         PersistedRecord(
@@ -35,6 +37,7 @@ def test_ph4_dup_001_checker_groups_exact_md5_for_function_and_method_only() -> 
             start_line=1,
             end_line=10,
             md5sum="same",
+            normalized_code="class C:\n    pass",
             intent="container",
         ),
     ]
@@ -58,6 +61,7 @@ def test_ph4_dup_002_checker_builds_fuzzy_group_with_best_and_avg_scores() -> No
             start_line=1,
             end_line=3,
             md5sum="m1",
+            normalized_code="def parse_file() -> dict:\n    return {}",
             intent="parse file content into json object",
         ),
         PersistedRecord(
@@ -68,6 +72,7 @@ def test_ph4_dup_002_checker_builds_fuzzy_group_with_best_and_avg_scores() -> No
             start_line=1,
             end_line=3,
             md5sum="m1",
+            normalized_code="def parse(self) -> dict:\n    return {}",
             intent="parse file contents into json object",
         ),
     ]
@@ -85,3 +90,40 @@ def test_ph4_dup_002_checker_builds_fuzzy_group_with_best_and_avg_scores() -> No
 def test_ph4_dup_003_checker_rejects_out_of_range_threshold() -> None:
     with pytest.raises(ValueError):
         DuplicationChecker(intent_threshold=1.2)
+
+
+def test_ph4_dup_004_checker_builds_normalized_code_fuzzy_groups() -> None:
+    checker = DuplicationChecker(intent_threshold=0.8)
+    records = [
+        PersistedRecord(
+            record_id=20,
+            kind="function",
+            file_path="a.py",
+            signature="def parse_a() -> dict:",
+            start_line=1,
+            end_line=3,
+            md5sum="m1",
+            normalized_code="def parse_a() -> dict:\n    return {'k': 1}",
+            intent="unrelated intent alpha",
+        ),
+        PersistedRecord(
+            record_id=21,
+            kind="method",
+            file_path="b.py",
+            signature="def parse_b(self) -> dict:",
+            start_line=1,
+            end_line=3,
+            md5sum="m2",
+            normalized_code="def parse_b(self) -> dict:\n    return {'k': 1}",
+            intent="totally different intent beta",
+        ),
+    ]
+
+    result = checker.check(records=records)
+
+    assert result.fuzzy_groups == []
+    assert len(result.normalized_code_fuzzy_groups) == 1
+    group = result.normalized_code_fuzzy_groups[0]
+    assert group.match_type == "normalized_code_fuzzy"
+    assert group.pair_count == 1
+    assert all(member.best_ratio >= 0.8 for member in group.members)

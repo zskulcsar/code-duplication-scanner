@@ -50,6 +50,22 @@
 - Description: Validate that `--scope all` enriches file records in addition to class/function/method records.
 - Expected: File record exists and has `intent_status=success`.
 
+* [x] **PH2_MOD_007** LLM client builder selects OpenAI client for OpenAI provider URL
+- Description: Validate that `build_llm_client` returns the OpenAI-backed client implementation when the provider URL targets OpenAI.
+- Expected: Returned client instance is `OpenAIClient`.
+
+* [x] **PH2_MOD_008** OpenAI client uses gpt-5.2-codex and reads response output text
+- Description: Validate that OpenAI client intent generation calls Responses API with `gpt-5.2-codex` and returns `output_text`.
+- Expected: Generated intent equals mocked `output_text`, and request model is exactly `gpt-5.2-codex`.
+
+* [x] **PH2_MOD_009** OpenAI client normalizes short OpenAI provider URL
+- Description: Validate that providing `openai.com` as provider URL resolves to the canonical OpenAI API base URL before client initialization.
+- Expected: OpenAI client is initialized with `https://api.openai.com/v1` and intent generation succeeds.
+
+* [x] **PH2_MOD_010** OpenAI client rejects malformed provider URL
+- Description: Validate that malformed OpenAI provider URLs fail fast with a clear initialization error.
+- Expected: `IntentGenerationError` is raised and contains an invalid-provider-url message.
+
 * [x] **PH3_MOD_001** CLI persist requires db path argument
 - Description: Validate that `persist` fails fast when `--db-path` is missing.
 - Expected: Exit code is `2` and execution does not proceed to analysis/enrichment.

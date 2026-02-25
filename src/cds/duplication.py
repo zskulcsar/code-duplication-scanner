@@ -3,7 +3,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import Levenshtein
 
@@ -24,6 +24,7 @@ class PersistedRecord:
         start_line: Start line in source.
         end_line: End line in source.
         md5sum: Normalized code checksum.
+        normalized_code: Normalized source code used for MD5 and fuzzy checks.
         intent: Generated intent text.
     """
 
@@ -34,6 +35,7 @@ class PersistedRecord:
     start_line: int
     end_line: int
     md5sum: str
+    normalized_code: str
     intent: str | None
 
 
@@ -46,6 +48,7 @@ class DuplicationMember:
     kind: SymbolKind
     file_path: str
     signature: str | None
+    normalized_code: str
     intent: str | None
     start_line: int
     end_line: int
@@ -62,7 +65,7 @@ class DuplicationGroup:
     members: list[DuplicationMember]
     pair_count: int
     md5_overlap_pairs: int
-    match_type: Literal["exact", "fuzzy"]
+    match_type: Literal["exact", "fuzzy", "normalized_code_fuzzy"]
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,7 @@ class DuplicationResult:
 
     exact_groups: list[DuplicationGroup]
     fuzzy_groups: list[DuplicationGroup]
+    normalized_code_fuzzy_groups: list[DuplicationGroup]
 
 
 @dataclass(frozen=True)
@@ -106,12 +110,25 @@ class DuplicationChecker:
             records: Candidate records loaded for a run.
 
         Returns:
-            Duplication results with exact and fuzzy groups.
+            Duplication results with exact, fuzzy-intent, and fuzzy-code groups.
         """
         eligible = [r for r in records if r.kind in {"function", "method"}]
         exact_groups = self._build_exact_groups(records=eligible)
-        fuzzy_groups = self._build_fuzzy_groups(records=eligible)
-        return DuplicationResult(exact_groups=exact_groups, fuzzy_groups=fuzzy_groups)
+        fuzzy_groups = self._build_fuzzy_groups_by_text(
+            records=eligible,
+            text_getter=lambda record: record.intent or "",
+            match_type="fuzzy",
+        )
+        normalized_code_fuzzy_groups = self._build_fuzzy_groups_by_text(
+            records=eligible,
+            text_getter=lambda record: record.normalized_code,
+            match_type="normalized_code_fuzzy",
+        )
+        return DuplicationResult(
+            exact_groups=exact_groups,
+            fuzzy_groups=fuzzy_groups,
+            normalized_code_fuzzy_groups=normalized_code_fuzzy_groups,
+        )
 
     def _build_exact_groups(
         self, records: list[PersistedRecord]
@@ -135,6 +152,7 @@ class DuplicationChecker:
                     kind=record.kind,
                     file_path=record.file_path,
                     signature=record.signature,
+                    normalized_code=record.normalized_code,
                     intent=record.intent,
                     start_line=record.start_line,
                     end_line=record.end_line,
@@ -156,20 +174,23 @@ class DuplicationChecker:
             group_id += 1
         return groups
 
-    def _build_fuzzy_groups(
-        self, records: list[PersistedRecord]
+    def _build_fuzzy_groups_by_text(
+        self,
+        records: list[PersistedRecord],
+        text_getter: Callable[[PersistedRecord], str],
+        match_type: Literal["fuzzy", "normalized_code_fuzzy"],
     ) -> list[DuplicationGroup]:
-        """Build fuzzy duplication groups by intent similarity."""
+        """Build fuzzy duplication groups by text similarity."""
         edges: list[_PairEdge] = []
         neighbors: dict[int, set[int]] = {record.record_id: set() for record in records}
         by_id = {record.record_id: record for record in records}
 
         sorted_records = sorted(records, key=lambda r: r.record_id)
         for index, left in enumerate(sorted_records):
-            left_intent = left.intent or ""
+            left_text = text_getter(left)
             for right in sorted_records[index + 1 :]:
-                right_intent = right.intent or ""
-                ratio = float(Levenshtein.ratio(left_intent, right_intent))
+                right_text = text_getter(right)
+                ratio = float(Levenshtein.ratio(left_text, right_text))
                 if ratio < self._intent_threshold:
                     continue
                 md5_match = left.md5sum == right.md5sum
@@ -234,6 +255,7 @@ class DuplicationChecker:
                         kind=record.kind,
                         file_path=record.file_path,
                         signature=record.signature,
+                        normalized_code=record.normalized_code,
                         intent=record.intent,
                         start_line=record.start_line,
                         end_line=record.end_line,
@@ -250,7 +272,7 @@ class DuplicationChecker:
                     md5_overlap_pairs=sum(
                         1 for edge in component_edges if edge.md5_match
                     ),
-                    match_type="fuzzy",
+                    match_type=match_type,
                 )
             )
             group_id += 1

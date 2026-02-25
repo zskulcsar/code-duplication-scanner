@@ -20,7 +20,7 @@ from cds.database import SQLitePersistence
 from cds.duplication import DuplicationGroup, DuplicationResult, DuplicationChecker
 from cds.intent_enricher import IntentEnricher
 from cds.llm_client import LLMClient
-from cds.llm import OllamaClient
+from cds.llm import OPENAI_CODEX_MODEL, OllamaClient, OpenAIClient
 from cds.model import Record
 from cds.model_builder import ModelBuilder
 from cds.persistence import (
@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 TABLE_COLUMN_RATIOS: dict[str, int] = {
     "kind": 1,
     "file_path": 1,
-    "signature": 4,
-    "normalized_code": 5,
+    "signature": 7,
+    "normalized_code": 10,
     "start_line": 1,
     "end_line": 1,
     "md5sum": 2,
@@ -46,8 +46,9 @@ GROUP_TABLE_COLUMN_RATIOS: dict[str, int] = {
     "record_id": 1,
     "kind": 1,
     "file_path": 2,
-    "signature": 4,
+    "signature": 3,
     "intent": 4,
+    "normalized_code": 5,
     "start_line": 1,
     "end_line": 1,
     "best_ratio": 1,
@@ -93,7 +94,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional output file path for raw JSON when --format json is used.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("model-build")
+    model_build_parser = subparsers.add_parser("model-build")
+    model_build_parser.add_argument(
+        "--analyzer-workers",
+        type=int,
+        default=4,
+        help="Number of analyzer worker threads.",
+    )
 
     enrich_intent_parser = subparsers.add_parser("enrich-intent")
     enrich_intent_parser.add_argument(
@@ -113,6 +120,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Emit progress line every N completed LLM calls.",
     )
+    enrich_intent_parser.add_argument(
+        "--analyzer-workers",
+        type=int,
+        default=4,
+        help="Number of analyzer worker threads.",
+    )
+    enrich_intent_parser.add_argument(
+        "--enricher-workers",
+        type=int,
+        default=4,
+        help="Number of intent enricher worker threads.",
+    )
     persist_parser = subparsers.add_parser("persist")
     persist_parser.add_argument(
         "--provider-url", required=True, help="Provider API endpoint URL."
@@ -131,6 +150,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Emit progress line every N completed LLM calls.",
+    )
+    persist_parser.add_argument(
+        "--analyzer-workers",
+        type=int,
+        default=4,
+        help="Number of analyzer worker threads.",
+    )
+    persist_parser.add_argument(
+        "--enricher-workers",
+        type=int,
+        default=4,
+        help="Number of intent enricher worker threads.",
     )
     dup_check_parser = subparsers.add_parser("dup-check")
     dup_check_parser.add_argument(
@@ -228,8 +259,14 @@ def _run_model_build(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -
         logger.warning(f"Path does not exist (path={root_path})")
         stderr.write(f"Path does not exist: {root_path}\n")
         return 2
+    if args.analyzer_workers <= 0:
+        logger.warning(
+            f"Invalid analyzer worker count (analyzer_workers={args.analyzer_workers})"
+        )
+        stderr.write("analyzer-workers must be > 0\n")
+        return 2
 
-    analyzer = PythonAnalyzer()
+    analyzer = PythonAnalyzer(max_workers=args.analyzer_workers)
     symbols, errors = analyzer.analyze(root_path)
     logger.info(
         f"Model build completed (path={root_path} records={len(symbols)} errors={len(errors)})"
@@ -287,6 +324,18 @@ def _run_enrich_intent(
         )
         stderr.write("progress-batch-size must be > 0\n")
         return 2
+    if args.analyzer_workers <= 0:
+        logger.warning(
+            f"Invalid analyzer worker count (analyzer_workers={args.analyzer_workers})"
+        )
+        stderr.write("analyzer-workers must be > 0\n")
+        return 2
+    if args.enricher_workers <= 0:
+        logger.warning(
+            f"Invalid enricher worker count (enricher_workers={args.enricher_workers})"
+        )
+        stderr.write("enricher-workers must be > 0\n")
+        return 2
 
     try:
         scopes = parse_scopes(args.scope)
@@ -295,13 +344,15 @@ def _run_enrich_intent(
         stderr.write(f"Invalid scope: {args.scope}\n")
         return 2
 
-    analyzer = PythonAnalyzer()
+    analyzer = PythonAnalyzer(max_workers=args.analyzer_workers)
     symbols, errors = analyzer.analyze(root_path)
     records = ModelBuilder().build(symbols=symbols)
 
     llm_client = build_llm_client(provider_url=args.provider_url, model=args.model)
     enriched = IntentEnricher(
-        llm_client=llm_client, progress_batch_size=args.progress_batch_size
+        llm_client=llm_client,
+        progress_batch_size=args.progress_batch_size,
+        max_workers=args.enricher_workers,
     ).enrich(records=records, scopes=scopes)
 
     logger.info(
@@ -355,6 +406,18 @@ def _run_persist(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         )
         stderr.write("progress-batch-size must be > 0\n")
         return 2
+    if args.analyzer_workers <= 0:
+        logger.warning(
+            f"Invalid analyzer worker count (analyzer_workers={args.analyzer_workers})"
+        )
+        stderr.write("analyzer-workers must be > 0\n")
+        return 2
+    if args.enricher_workers <= 0:
+        logger.warning(
+            f"Invalid enricher worker count (enricher_workers={args.enricher_workers})"
+        )
+        stderr.write("enricher-workers must be > 0\n")
+        return 2
     db_path = Path(args.db_path)
     if not db_path.parent.exists():
         logger.warning(f"Parent directory does not exist (db_path={db_path})")
@@ -367,13 +430,15 @@ def _run_persist(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         stderr.write(f"Invalid scope: {args.scope}\n")
         return 2
 
-    analyzer = PythonAnalyzer()
+    analyzer = PythonAnalyzer(max_workers=args.analyzer_workers)
     symbols, errors = analyzer.analyze(root_path)
     records = ModelBuilder().build(symbols=symbols)
 
     llm_client = build_llm_client(provider_url=args.provider_url, model=args.model)
     enriched = IntentEnricher(
-        llm_client=llm_client, progress_batch_size=args.progress_batch_size
+        llm_client=llm_client,
+        progress_batch_size=args.progress_batch_size,
+        max_workers=args.enricher_workers,
     ).enrich(records=records, scopes=scopes)
     _write_errors(errors=errors, stderr=stderr)
 
@@ -497,6 +562,12 @@ def build_llm_client(provider_url: str, model: str) -> LLMClient:
     Returns:
         Configured LLM client.
     """
+    normalized_provider_url = provider_url.strip().lower()
+    if "openai.com" in normalized_provider_url or normalized_provider_url == "openai":
+        return OpenAIClient(
+            provider_url=provider_url,
+            model=OPENAI_CODEX_MODEL,
+        )
     return OllamaClient(provider_url=provider_url, model=model)
 
 
@@ -669,6 +740,11 @@ def _write_duplication_tables(result: DuplicationResult, stdout: TextIO) -> None
         groups=result.fuzzy_groups,
         console=console,
     )
+    _write_group_section(
+        title="Normalized Code Fuzzy Duplication Groups",
+        groups=result.normalized_code_fuzzy_groups,
+        console=console,
+    )
 
 
 def _write_group_section(
@@ -685,6 +761,7 @@ def _write_group_section(
     if not groups:
         console.print("No groups")
         return
+    show_normalized_code = groups[0].match_type == "normalized_code_fuzzy"
     for group in groups:
         console.rule(
             f"group_id={group.group_id} members={len(group.members)} "
@@ -692,7 +769,13 @@ def _write_group_section(
             style=Style(color="green"),
             characters="-",
         )
-        table = Table(show_header=True, show_lines=True, expand=True)
+        table = Table(
+            show_header=True,
+            show_lines=True,
+            expand=True,
+            highlight=True,
+            header_style="bold",
+        )
         table.add_column(
             "group_id",
             ratio=GROUP_TABLE_COLUMN_RATIOS["group_id"],
@@ -720,11 +803,18 @@ def _write_group_section(
             ratio=GROUP_TABLE_COLUMN_RATIOS["signature"],
             overflow="fold",
         )
-        table.add_column(
-            "intent",
-            ratio=GROUP_TABLE_COLUMN_RATIOS["intent"],
-            overflow="fold",
-        )
+        if show_normalized_code:
+            table.add_column(
+                "normalized_code",
+                ratio=GROUP_TABLE_COLUMN_RATIOS["normalized_code"],
+                overflow="fold",
+            )
+        else:
+            table.add_column(
+                "intent",
+                ratio=GROUP_TABLE_COLUMN_RATIOS["intent"],
+                overflow="fold",
+            )
         table.add_column(
             "start_line",
             ratio=GROUP_TABLE_COLUMN_RATIOS["start_line"],
@@ -761,7 +851,11 @@ def _write_group_section(
                 str(member.kind),
                 str(member.file_path),
                 str(member.signature),
-                str(member.intent),
+                (
+                    str(member.normalized_code)
+                    if show_normalized_code
+                    else str(member.intent)
+                ),
                 str(member.start_line),
                 str(member.end_line),
                 f"{member.best_ratio:.4f}",

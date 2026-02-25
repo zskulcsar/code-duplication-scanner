@@ -2,6 +2,7 @@
 """Python source analyzer implementation."""
 
 import ast
+import concurrent.futures
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,8 +17,28 @@ class _NodeContext:
     scope: str
 
 
+@dataclass(frozen=True)
+class _FileAnalyzeResult:
+    file_path: str
+    symbols: list[ExtractedSymbol]
+    error: AnalyzerError | None
+
+
 class PythonAnalyzer:
     """Analyze Python files and extract source symbols."""
+
+    def __init__(self, max_workers: int = 4) -> None:
+        """Initialize analyzer.
+
+        Args:
+            max_workers: Maximum number of worker threads used for file parsing.
+
+        Raises:
+            ValueError: If ``max_workers`` is not greater than zero.
+        """
+        if max_workers <= 0:
+            raise ValueError("max_workers must be > 0")
+        self._max_workers = max_workers
 
     def analyze(
         self, root_path: Path
@@ -30,30 +51,52 @@ class PythonAnalyzer:
         Returns:
             A tuple of extracted symbols and recoverable analyzer errors.
         """
+        file_paths = sorted(root_path.rglob("*.py"))
+        if not file_paths:
+            return [], []
+
+        file_results: list[_FileAnalyzeResult] = []
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self._max_workers
+        ) as executor:
+            future_to_path = {
+                executor.submit(self._analyze_file, root_path, file_path): file_path
+                for file_path in file_paths
+            }
+            for future in concurrent.futures.as_completed(future_to_path):
+                file_results.append(future.result())
+
+        file_results.sort(key=lambda result: result.file_path)
         symbols: list[ExtractedSymbol] = []
         errors: list[AnalyzerError] = []
-
-        for file_path in sorted(root_path.rglob("*.py")):
-            try:
-                source = file_path.read_text(encoding="utf-8")
-                tree = ast.parse(source, filename=str(file_path))
-            except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
-                relative_path = str(file_path.relative_to(root_path))
-                logger.warning(
-                    f"Skipping file due to parse/read failure (file_path={relative_path} error={exc})",
-                )
-                errors.append(AnalyzerError(file_path=relative_path, message=str(exc)))
-                continue
-
-            lines = source.splitlines()
-            symbols.append(
-                self._build_file_symbol(root_path, file_path, source, len(lines))
-            )
-            symbols.extend(
-                self._extract_node_symbols(root_path, file_path, lines, tree.body)
-            )
+        for file_result in file_results:
+            symbols.extend(file_result.symbols)
+            if file_result.error is not None:
+                errors.append(file_result.error)
 
         return symbols, errors
+
+    def _analyze_file(self, root_path: Path, file_path: Path) -> _FileAnalyzeResult:
+        relative_path = str(file_path.relative_to(root_path))
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(file_path))
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
+            logger.warning(
+                f"Skipping file due to parse/read failure (file_path={relative_path} error={exc})",
+            )
+            return _FileAnalyzeResult(
+                file_path=relative_path,
+                symbols=[],
+                error=AnalyzerError(file_path=relative_path, message=str(exc)),
+            )
+
+        lines = source.splitlines()
+        symbols = [self._build_file_symbol(root_path, file_path, source, len(lines))]
+        symbols.extend(
+            self._extract_node_symbols(root_path, file_path, lines, tree.body)
+        )
+        return _FileAnalyzeResult(file_path=relative_path, symbols=symbols, error=None)
 
     def _build_file_symbol(
         self, root_path: Path, file_path: Path, source: str, line_count: int
