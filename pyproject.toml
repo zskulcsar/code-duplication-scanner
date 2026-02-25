@@ -5,7 +5,9 @@ description = "Experiment with LLM based code duplication checker"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "openai>=2.11.0",
     "ollama>=0.6.1",
+    "pathspec>=0.12.1",
     "python-levenshtein>=0.27.3",
     "textual>=8.0.0",
 ]
