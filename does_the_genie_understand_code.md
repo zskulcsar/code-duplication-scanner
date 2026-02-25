@@ -132,7 +132,7 @@ Not really surprising. In the end, these classes, methods, and functions are too
 ## I hear you, this is a valid challenge.
 
 So let me give you this:
-### [analyzer.py#def analyze_project\(project_root: Path, files: list\[Path\]\) -> ProjectIndex:]() vs. [analyzer.py#def es\(oy: Path, it: list\[Path\]\) -> aa:]()
+### [analyzer.py#def analyze_project\(project_root: Path, files: list\[Path\]\) -> ProjectIndex:](https://github.com/zskulcsar/code-duplication-scanner/blob/main/docs/post/analyze_project.py) vs. [analyzer.py#def es\(oy: Path, it: list\[Path\]\) -> aa:](https://github.com/zskulcsar/code-duplication-scanner/blob/main/docs/post/es.py)
 
 qwen3-coder:latest intent | gpt-oss:20b intent | slekrem/gpt-oss-claude-code-32k:20b | gpt-5.2-codex intent |
 |-|-|-|-|
@@ -140,7 +140,7 @@ qwen3-coder:latest intent | gpt-oss:20b intent | slekrem/gpt-oss-claude-code-32k
 | This function analyzes a list of files to extract and categorize different types of code elements (py, ig, ox, ow, la) while handling various read and parse errors. | Analyzes a list of Python files, collecting defined, imported, and other symbol names, and returns aggregated sets of these names. | It analyzes a list of files, extracts and categorizes identifiers into sets, and returns those sets as immutable collections. | It analyzes a list of Python files, collecting and filtering various identifier sets from their parsed ASTs, and returns them in a result object. |
 
 and this
-### [rewriter.py#class _Renamer\(ast.NodeTransformer\):]() vs. [rewriter.py#class av\(xr.NodeTransformer\):]()
+### [rewriter.py#class _Renamer\(ast.NodeTransformer\):](https://github.com/zskulcsar/code-duplication-scanner/blob/main/docs/post/renamer.py) vs. [rewriter.py#class av\(xr.NodeTransformer\):](https://github.com/zskulcsar/code-duplication-scanner/blob/main/docs/post/av.py)
 
 | qwen3-coder:latest intent | gpt-oss:20b intent | slekrem/gpt-oss-claude-code-32k:20b | gpt-5.2-codex intent |
 |-|-|-|-|
