@@ -96,6 +96,38 @@ Notes:
   - fuzzy duplication groups (`Levenshtein.ratio(intent, intent)`)
 - `--intent-threshold` is optional and defaults to `0.85`.
 
+## Obfuscator
+
+The project includes an experimental obfuscation CLI that creates a transformed copy of a Python project.
+
+What it does:
+- Copies the input project to an output directory while honoring `.gitignore` patterns.
+- Builds a project-wide symbol map and rewrites in-project Python identifiers consistently across files.
+- Keeps external dependency symbols untouched to preserve behavior.
+- Prints phase markers and summary counters for copy and transform steps.
+
+Run directly:
+
+```bash
+PYTHONPATH=src uv run python -m cli.obfuscation_harness --input ./src_project --output ./tmp/obfuscated_project
+```
+
+Use Makefile helper:
+
+```bash
+make run-obfuscation-cli ARGS="--input ./src_project --output ./tmp/obfuscated_project"
+```
+
+Output format:
+- phase markers like `validation:start`, `copy:done`, `transform:done`
+- summary counters like `files_copied`, `paths_skipped_by_gitignore`, `python_files_processed`, `symbols_renamed`
+- final `status=success` on success
+
+Input and output constraints:
+- `--input` must exist, must be a directory, and must contain a `.gitignore` file.
+- `--output` must be empty if it already exists.
+- input and output paths must not overlap (neither can be inside the other).
+
 ## Display Note
 
 The table view is best experienced on wide screens/terminals because signatures and normalized code can be long.

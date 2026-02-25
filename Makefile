@@ -4,6 +4,7 @@
 # Python
 PY_ROOT := $(CURDIR)
 BE_SRC = $(PY_ROOT)/src
+TEST_SRC = $(PY_ROOT)/tests
 PYTHON_SRC_DIRS := $(PY_ROOT)/src tests
 
 ## Default
@@ -57,6 +58,14 @@ imp-verify: fmt-py lint-py tc-py test-unit-py ## Helper to run mandatory checks
 run-cli: venv ## Run the CLI with parameters passed in ARGS (--command model-build)
 	@PYTHONPATH=$(BE_SRC) PYTHONPYCACHEPREFIX=$(CURDIR)/.pycache \
 	uv run python -m cli.cli_verification_harness $(ARGS)
+
+run-obfuscation-cli: venv ## Run the obfuscation CLI with parameters passed in ARGS
+	@PYTHONPATH=$(BE_SRC) PYTHONPYCACHEPREFIX=$(CURDIR)/.pycache \
+	uv run python -m cli.obfuscation_harness $(ARGS)
+
+clean: ## Clean the project from unwanted folders, aka. junk
+	@find $(BE_SRC) -type d -name __pycache__ -exec rm -rf {} +
+	@find $(TEST_SRC) -type d -name __pycache__ -exec rm -rf {} +
 
 # run-exp: venv ## Ran any helper cli class via CLI=page_stats PAR="./tests/fixtures/templates/extraction/opinion/tmp-SOC2-TypeII-F01-opinion.json --pages 5"
 # 	@PYTHONPATH=$(BE_SRC) PYTHONPYCACHEPREFIX=$(CURDIR)/.pycache \
